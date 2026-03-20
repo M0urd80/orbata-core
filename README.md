@@ -61,9 +61,31 @@ Use curl or Postman:
 curl -X POST "http://localhost:8101/otp/send?email=test@test.com"
 ```
 
-## v0.2 - Async Processing
+## v0.2 - Async OTP Delivery
 
-- Redis-based queue system
-- Event-driven OTP delivery
-- Email worker service
-- Non-blocking API architecture
+Orbata Core now supports asynchronous OTP delivery using a Redis-based queue and a dedicated email worker.
+
+### Flow
+
+Client -> Core API -> Redis Queue -> Email Worker -> SMTP -> Inbox
+
+### Features
+
+- Non-blocking OTP generation
+- Scalable worker-based delivery
+- Real email sending via Brevo SMTP
+- Verified domain (DKIM + DMARC)
+
+### Environment Variables
+
+Create a `.env` file:
+
+```env
+SMTP_SERVER=smtp-relay.brevo.com
+SMTP_PORT=587
+SMTP_LOGIN=your_smtp_login
+SMTP_PASSWORD=your_smtp_key
+FROM_EMAIL=no-reply@yourdomain.com
+```
+
+⚠️ Keep SMTP credentials private and never commit `.env` to version control.

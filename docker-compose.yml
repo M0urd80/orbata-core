@@ -14,6 +14,14 @@ services:
     env_file:
       - .env
 
+  email-retry:
+    build: ./services/email-service
+    command: ["python", "retry_worker.py"]
+    depends_on:
+      - redis
+    env_file:
+      - .env
+
   redis:
     image: redis:7
     ports:

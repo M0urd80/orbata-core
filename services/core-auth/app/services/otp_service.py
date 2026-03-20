@@ -21,6 +21,9 @@ def publish_otp_event(email: str, otp: str):
         "type": "OTP",
         "email": email,
         "otp": otp,
+        "attempt": 0,
+        "max_attempts": 3,
+        "next_try_at": 0,
     }
     r.lpush("email_queue", json.dumps(event))
     print("📤 Event pushed to queue")
