@@ -2,3 +2,5 @@ fastapi
 uvicorn
 redis
 email-validator
+sqlalchemy
+psycopg[binary]
