@@ -4,7 +4,8 @@ from pydantic import BaseModel, EmailStr, constr
 import redis
 from app.services.otp_service import generate_otp, store_otp, publish_otp_event
 from app.services.verification_service import verify_otp
-from app.services.rate_limiter import check_rate_limit
+from app.services.rate_limiter import check_rate_limit as check_email_ip_rate_limit
+from app.services.rate_limit_service import check_rate_limit as check_client_rate_limit
 from app.services.usage_service import increment_usage
 
 router = APIRouter()
@@ -26,6 +27,11 @@ async def send_otp(
     data: Optional[SendOTPRequest] = Body(default=None),
     email: Optional[str] = Query(default=None),
 ):
+    client_ctx = getattr(request.state, "client", None)
+    if not client_ctx or not client_ctx.get("id"):
+        raise HTTPException(status_code=401, detail="Invalid client context")
+    check_client_rate_limit(str(client_ctx["id"]))
+
     raw_email = str(data.email) if data and data.email else email
     if not raw_email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -39,8 +45,8 @@ async def send_otp(
     client_ip = request.client.host
 
     try:
-        check_rate_limit(email)
-        check_rate_limit(client_ip)
+        check_email_ip_rate_limit(email)
+        check_email_ip_rate_limit(client_ip)
     except Exception as e:
         raise HTTPException(status_code=429, detail=str(e))
 
@@ -53,9 +59,7 @@ async def send_otp(
     store_otp(email, otp)
     publish_otp_event(email, otp)
 
-    client = getattr(request.state, "client", None)
-    if client and client.get("id"):
-        increment_usage(str(client["id"]))
+    increment_usage(str(client_ctx["id"]))
 
     # TEMP DEBUG: return OTP for local testing only
     return {"message": "OTP sent", "otp": otp}
