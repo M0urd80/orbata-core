@@ -57,7 +57,8 @@ async def send_otp(
 
     otp = generate_otp()
     store_otp(email, otp)
-    publish_otp_event(email, otp)
+    client_name = client_ctx.get("email_from_name") or client_ctx["name"]
+    publish_otp_event(email, otp, client_name, str(client_ctx["id"]))
 
     increment_usage(str(client_ctx["id"]))
 

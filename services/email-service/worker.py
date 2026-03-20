@@ -8,6 +8,8 @@ from email.mime.text import MIMEText
 
 import redis
 
+from email_log_writer import write_email_log
+
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
 
 SMTP_SERVER = os.getenv("SMTP_SERVER")
@@ -45,10 +47,11 @@ def get_smtp_connection():
     return smtp_conn
 
 
-def send_email(to_email, otp):
+def send_email(to_email, otp, client_name: str):
     global smtp_conn
 
-    msg = MIMEText(f"Your OTP code is: {otp}")
+    body = f"Your {client_name} verification code is: {otp}"
+    msg = MIMEText(body)
     msg["Subject"] = "Your verification code"
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
@@ -102,12 +105,20 @@ def process_job(job):
             status="processing",
             attempt=job.get("attempt", 0),
         )
-        send_email(job["email"], job["otp"])
+        client_name = job.get("client_name") or "Orbata"
+        send_email(job["email"], job["otp"], client_name)
         log_event(
             "email_sent",
             email=job.get("email", ""),
             status="success",
             attempt=job.get("attempt", 0),
+        )
+        write_email_log(
+            job.get("client_id"),
+            job["email"],
+            "success",
+            job.get("attempt", 0),
+            error_message=None,
         )
     except Exception as e:
         log_event(
@@ -116,6 +127,13 @@ def process_job(job):
             status="failed",
             attempt=job.get("attempt", 0),
             error=str(e),
+        )
+        write_email_log(
+            job.get("client_id"),
+            job.get("email", ""),
+            "failed",
+            job.get("attempt", 0),
+            error_message=str(e),
         )
         if job["attempt"] < job["max_attempts"]:
             schedule_retry(job)

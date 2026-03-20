@@ -25,9 +25,11 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
             if client.expires_at and client.expires_at < datetime.now(timezone.utc):
                 return JSONResponse(status_code=401, content={"detail": "API key expired"})
 
+            display_name = client.email_from_name or client.name
             request.state.client = {
                 "id": str(client.id),
                 "name": client.name,
+                "email_from_name": display_name,
             }
 
         return await call_next(request)

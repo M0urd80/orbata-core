@@ -2,10 +2,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.config import ADMIN_SECRET
 from app.core.database import get_db
+from app.models.email_log import EmailLog
 from app.schemas.client import ClientCreateRequest, ClientCreateResponse
 from app.services.api_key_service import create_client, rotate_api_key
 from app.services.usage_service import get_usage_today
@@ -31,6 +33,34 @@ def get_usage(
     return get_usage_today(client_id)
 
 
+@router.get("/logs/{client_id}")
+def get_email_logs(
+    client_id: UUID,
+    x_admin_secret: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_admin_secret(x_admin_secret)
+    stmt = (
+        select(EmailLog)
+        .where(EmailLog.client_id == client_id)
+        .order_by(desc(EmailLog.created_at))
+        .limit(50)
+    )
+    rows = db.execute(stmt).scalars().all()
+    return [
+        {
+            "id": str(row.id),
+            "client_id": str(row.client_id),
+            "email": row.email,
+            "status": row.status,
+            "attempts": row.attempts,
+            "error_message": row.error_message,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+
+
 @router.post("/clients", response_model=ClientCreateResponse)
 def create_client_endpoint(
     data: ClientCreateRequest,
@@ -38,7 +68,7 @@ def create_client_endpoint(
     db: Session = Depends(get_db),
 ):
     require_admin_secret(x_admin_secret)
-    client_id, api_key = create_client(db, data.name)
+    client_id, api_key = create_client(db, data.name, data.email_from_name)
     return {"client_id": str(client_id), "api_key": api_key}
 
 

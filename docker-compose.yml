@@ -24,6 +24,21 @@ services:
     env_file:
       - .env
 
+  admin-panel:
+    build: ./services/admin-panel
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: orbata
+      POSTGRES_USER: orbata
+      POSTGRES_PASSWORD: orbata
+      NODE_ENV: production
+
   redis:
     image: redis:7
     ports:

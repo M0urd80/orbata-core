@@ -62,5 +62,6 @@ def get_db():
 def init_db_schema() -> None:
     """Create tables only after DB is reachable (engine already verified at import)."""
     from app.models.client import Client  # noqa: F401
+    from app.models.email_log import EmailLog  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
