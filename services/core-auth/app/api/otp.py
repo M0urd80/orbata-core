@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
-from app.services.otp_service import generate_otp, store_otp
+from app.services.otp_service import generate_otp, store_otp, publish_otp_event
 from app.services.verification_service import verify_otp
 from app.services.rate_limiter import check_rate_limit
 
@@ -18,6 +18,7 @@ async def send_otp(request: Request, email: str):
 
     otp = generate_otp()
     store_otp(email, otp)
+    publish_otp_event(email, otp)
 
     # TEMP DEBUG: return OTP for local testing only
     return {"message": "OTP sent", "otp": otp}
