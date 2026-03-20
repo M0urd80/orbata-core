@@ -3,7 +3,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.api.otp import router as otp_router
 from app.api.admin import router as admin_router
-from app.core.database import Base, engine
+from app.core.database import init_db_schema
 from app.middleware.api_key_middleware import ApiKeyMiddleware
 from app.models.client import Client  # noqa: F401
 
@@ -16,7 +16,7 @@ app.include_router(admin_router, prefix="/admin")
 
 @app.on_event("startup")
 def on_startup():
-    Base.metadata.create_all(bind=engine)
+    init_db_schema()
 
 
 @app.exception_handler(RequestValidationError)

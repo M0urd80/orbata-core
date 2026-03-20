@@ -5,6 +5,7 @@ import redis
 from app.services.otp_service import generate_otp, store_otp, publish_otp_event
 from app.services.verification_service import verify_otp
 from app.services.rate_limiter import check_rate_limit
+from app.services.usage_service import increment_usage
 
 router = APIRouter()
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
@@ -51,6 +52,10 @@ async def send_otp(
     otp = generate_otp()
     store_otp(email, otp)
     publish_otp_event(email, otp)
+
+    client = getattr(request.state, "client", None)
+    if client and client.get("id"):
+        increment_usage(str(client["id"]))
 
     # TEMP DEBUG: return OTP for local testing only
     return {"message": "OTP sent", "otp": otp}

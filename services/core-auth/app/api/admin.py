@@ -1,18 +1,16 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.core.config import ADMIN_SECRET
-from app.core.database import SessionLocal
-from app.services.api_key_service import create_client_with_expiration, rotate_api_key
+from app.core.database import get_db
+from app.schemas.client import ClientCreateRequest, ClientCreateResponse
+from app.services.api_key_service import create_client, rotate_api_key
+from app.services.usage_service import get_usage_today
 
 router = APIRouter()
-
-
-class CreateClientRequest(BaseModel):
-    name: str = Field(min_length=2, max_length=255)
-    expires_in_days: int | None = Field(default=None, ge=1)
 
 
 class RotateApiKeyRequest(BaseModel):
@@ -21,26 +19,27 @@ class RotateApiKeyRequest(BaseModel):
 
 def require_admin_secret(secret: str | None):
     if not secret or secret != ADMIN_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid admin secret")
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
 
 
-@router.post("/clients")
-def create_client(data: CreateClientRequest, x_admin_secret: str | None = Header(default=None)):
+@router.get("/usage/{client_id}")
+def get_usage(
+    client_id: str,
+    x_admin_secret: str | None = Header(default=None),
+):
     require_admin_secret(x_admin_secret)
-    db = SessionLocal()
-    try:
-        client, raw_api_key = create_client_with_expiration(
-            db, data.name, data.expires_in_days
-        )
-    finally:
-        db.close()
+    return get_usage_today(client_id)
 
-    return {
-        "id": str(client.id),
-        "name": client.name,
-        "api_key": raw_api_key,
-        "expires_at": client.expires_at.isoformat() if client.expires_at else None,
-    }
+
+@router.post("/clients", response_model=ClientCreateResponse)
+def create_client_endpoint(
+    data: ClientCreateRequest,
+    x_admin_secret: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_admin_secret(x_admin_secret)
+    client_id, api_key = create_client(db, data.name)
+    return {"client_id": str(client_id), "api_key": api_key}
 
 
 @router.post("/clients/{client_id}/rotate")
@@ -48,14 +47,10 @@ def rotate_client_key(
     client_id: UUID,
     data: RotateApiKeyRequest,
     x_admin_secret: str | None = Header(default=None),
+    db: Session = Depends(get_db),
 ):
     require_admin_secret(x_admin_secret)
-    db = SessionLocal()
-    try:
-        rotated = rotate_api_key(db, client_id, data.expires_in_days)
-    finally:
-        db.close()
-
+    rotated = rotate_api_key(db, client_id, data.expires_in_days)
     if not rotated:
         raise HTTPException(status_code=404, detail="Client not found")
 

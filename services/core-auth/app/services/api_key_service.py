@@ -32,8 +32,8 @@ def create_client_with_api_key(db: Session, name: str) -> tuple[Client, str]:
 
 
 def create_client(db: Session, name: str) -> str:
-    _, raw_api_key = create_client_with_api_key(db, name)
-    return raw_api_key
+    client, raw_api_key = create_client_with_api_key(db, name)
+    return client.id, raw_api_key
 
 
 def create_client_with_expiration(
