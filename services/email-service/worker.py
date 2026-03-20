@@ -1,9 +1,11 @@
-import redis
 import json
-import time
-import smtplib
+import logging
 import os
+import smtplib
+import time
 from email.mime.text import MIMEText
+
+import redis
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
 
@@ -13,56 +15,115 @@ SMTP_LOGIN = os.getenv("SMTP_LOGIN")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
+smtp_conn = None
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("email-worker")
+
+
+def log_event(event: str, email: str = "", status: str = "", attempt: int = 0, **extra):
+    payload = {
+        "event": event,
+        "email": email,
+        "status": status,
+        "attempt": attempt,
+    }
+    payload.update(extra)
+    logger.info(json.dumps(payload))
+
+
+def get_smtp_connection():
+    global smtp_conn
+
+    if smtp_conn is None:
+        smtp_conn = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+        smtp_conn.starttls()
+        smtp_conn.login(SMTP_LOGIN, SMTP_PASSWORD)
+        log_event("smtp_connected", status="success")
+
+    return smtp_conn
+
 
 def send_email(to_email, otp):
-    msg = MIMEText(f"Your OTP code is: {otp}\nValid for 5 minutes.")
+    global smtp_conn
+
+    msg = MIMEText(f"Your OTP code is: {otp}")
     msg["Subject"] = "Your verification code"
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_LOGIN, SMTP_PASSWORD)
-        server.send_message(msg)
+    try:
+        conn = get_smtp_connection()
+        conn.send_message(msg)
+    except Exception:
+        log_event("smtp_failed_reconnecting", email=to_email, status="retry")
+        smtp_conn = None
+        conn = get_smtp_connection()
+        conn.send_message(msg)
 
 
 def schedule_retry(job):
     job["attempt"] += 1
-
-    # exponential backoff (seconds)
     delay = 2 ** job["attempt"]
     job["next_try_at"] = int(time.time()) + delay
 
-    print(f"🔁 Scheduling retry #{job['attempt']} in {delay}s", flush=True)
-
+    log_event(
+        "email_retry_scheduled",
+        email=job.get("email", ""),
+        status="retry",
+        attempt=job["attempt"],
+        delay_seconds=delay,
+    )
     r.lpush("email_retry_queue", json.dumps(job))
 
 
 def move_to_dlq(job):
-    print("💀 Moving to DLQ:", job, flush=True)
+    log_event(
+        "email_moved_dlq",
+        email=job.get("email", ""),
+        status="failed",
+        attempt=job.get("attempt", 0),
+    )
     r.lpush("email_dlq", json.dumps(job))
 
 
 def process_job(job):
     try:
-        print(f"📨 Sending OTP to {job['email']}", flush=True)
+        log_event(
+            "email_processing",
+            email=job.get("email", ""),
+            status="processing",
+            attempt=job.get("attempt", 0),
+        )
         send_email(job["email"], job["otp"])
-        print("✅ Email sent", flush=True)
-
+        log_event(
+            "email_sent",
+            email=job.get("email", ""),
+            status="success",
+            attempt=job.get("attempt", 0),
+        )
     except Exception as e:
-        print(f"❌ Failed: {e}", flush=True)
-
+        log_event(
+            "email_failed",
+            email=job.get("email", ""),
+            status="failed",
+            attempt=job.get("attempt", 0),
+            error=str(e),
+        )
         if job["attempt"] < job["max_attempts"]:
             schedule_retry(job)
         else:
             move_to_dlq(job)
 
 
-print("📧 Email worker started...", flush=True)
+log_event("worker_started", status="success")
 
 while True:
-    job = r.brpop("email_queue", timeout=2)
-
-    if job:
-        data = json.loads(job[1])
-        process_job(data)
+    try:
+        job = r.brpop("email_queue", timeout=2)
+        if job:
+            data = json.loads(job[1])
+            process_job(data)
+    except Exception as e:
+        log_event("worker_error", status="error", error=str(e))
+        time.sleep(1)

@@ -11,6 +11,10 @@ def generate_otp():
     return str(random.randint(100000, 999999))
 
 
+def acquire_otp_lock(identifier: str, ttl: int = 60) -> bool:
+    return bool(r.set(f"otp:lock:{identifier}", "1", ex=ttl, nx=True))
+
+
 def store_otp(identifier: str, otp: str):
     hashed = hash_otp(otp)
     r.setex(f"otp:{identifier}", OTP_TTL, hashed)

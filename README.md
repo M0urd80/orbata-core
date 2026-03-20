@@ -89,3 +89,23 @@ FROM_EMAIL=no-reply@yourdomain.com
 ```
 
 ⚠️ Keep SMTP credentials private and never commit `.env` to version control.
+
+## v0.3 - Reliability Layer
+
+Orbata Core now includes a reliability layer to improve delivery guarantees for asynchronous OTP email processing.
+
+### Architecture
+
+Core -> Queue -> Worker -> Retry -> DLQ
+
+### Reliability Capabilities
+
+- Retry system with exponential backoff to reduce transient SMTP or network failures.
+- Dead-letter queue (DLQ) handling for jobs that exceed max retry attempts.
+- Fault-tolerant email delivery flow with controlled reprocessing and failure isolation.
+
+### Redis Queues
+
+- `email_queue`: primary queue for new OTP delivery jobs.
+- `email_retry_queue`: retry queue for delayed reprocessing attempts.
+- `email_dlq`: dead-letter queue for permanently failed jobs.
