@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import smtplib
 import time
 from email.mime.text import MIMEText
@@ -64,25 +65,31 @@ def send_email(to_email, otp):
 
 def schedule_retry(job):
     job["attempt"] += 1
-    delay = 2 ** job["attempt"]
+
+    delay = (2 ** job["attempt"]) + random.randint(0, 2)
     job["next_try_at"] = int(time.time()) + delay
 
     log_event(
-        "email_retry_scheduled",
+        "retry_scheduled",
         email=job.get("email", ""),
         status="retry",
         attempt=job["attempt"],
-        delay_seconds=delay,
+        delay=delay,
     )
-    r.lpush("email_retry_queue", json.dumps(job))
+    r.zadd("email_retry_zset", {json.dumps(job): job["next_try_at"]})
 
 
-def move_to_dlq(job):
+def move_to_dlq(job, error):
+    job["failure_reason"] = str(error)
+    job["final_attempt_at"] = int(time.time())
+    job["total_attempts"] = job.get("attempt", 0)
+
     log_event(
-        "email_moved_dlq",
+        "moved_to_dlq",
         email=job.get("email", ""),
         status="failed",
         attempt=job.get("attempt", 0),
+        reason=str(error),
     )
     r.lpush("email_dlq", json.dumps(job))
 
@@ -113,7 +120,7 @@ def process_job(job):
         if job["attempt"] < job["max_attempts"]:
             schedule_retry(job)
         else:
-            move_to_dlq(job)
+            move_to_dlq(job, e)
 
 
 log_event("worker_started", status="success")

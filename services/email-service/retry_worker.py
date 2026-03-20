@@ -7,15 +7,12 @@ r = redis.Redis(host="redis", port=6379, decode_responses=True)
 print("🔁 Retry worker started...", flush=True)
 
 while True:
-    job = r.brpop("email_retry_queue", timeout=5)
+    now = int(time.time())
+    jobs = r.zrangebyscore("email_retry_zset", 0, now)
 
-    if job:
-        data = json.loads(job[1])
+    for job in jobs:
+        print("🔄 Requeueing job", flush=True)
+        r.lpush("email_queue", job)
+        r.zrem("email_retry_zset", job)
 
-        if int(time.time()) >= data["next_try_at"]:
-            print("🔄 Requeueing job", flush=True)
-            r.lpush("email_queue", json.dumps(data))
-        else:
-            # not ready -> push back
-            r.lpush("email_retry_queue", json.dumps(data))
-            time.sleep(1)
+    time.sleep(1)
