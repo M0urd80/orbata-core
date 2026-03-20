@@ -1,0 +1,29 @@
+services:
+  core-auth:
+    build: ./services/core-auth
+    ports:
+      - "8101:8000"
+    depends_on:
+      - redis
+      - postgres
+
+  email-service:
+    build: ./services/email-service
+    depends_on:
+      - redis
+    env_file:
+      - .env
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: orbata
+      POSTGRES_PASSWORD: orbata
+      POSTGRES_DB: orbata
+    ports:
+      - "5432:5432"
