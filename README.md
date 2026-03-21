@@ -22,7 +22,7 @@ Orbata Core is a lightweight authentication and OTP verification engine with API
 Client (x-api-key)
     → Core API (FastAPI)
         → PostgreSQL (clients / API key validation)
-        → Redis (OTP, rate limits, usage, locks)
+        → Redis (OTP, rate limits, locks); Postgres **`usage`** (daily aggregates)
         → Redis list email_queue
     → Email worker → SMTP
     → Retry worker (ZSET) → requeue to email_queue
@@ -99,20 +99,21 @@ Invalid secret → **403**.
 | Method | Path                           | Auth              | Description |
 |--------|--------------------------------|-------------------|-------------|
 | `POST` | `/admin/clients`               | `x-admin-secret`  | Create client; returns `client_id` + **raw `api_key` once** |
-| `GET`  | `/admin/usage/{client_id}`     | `x-admin-secret`  | Today’s OTP-send count for that client (Redis) |
+| `GET`  | `/admin/usage/{client_id}`     | `x-admin-secret`  | Daily **Postgres** aggregates: `[{ date, sent_count, success_count, fail_count }, …]` (newest first) |
 | `GET`  | `/admin/logs/{client_id}`      | `x-admin-secret`  | Last **50** email send attempts for that client (Postgres), newest first |
 | `POST` | `/admin/clients/{id}/rotate`   | `x-admin-secret`  | Rotate API key; returns new raw key once |
 
 ---
 
-## Rate limiting and usage (Redis)
+## Rate limiting (Redis) and usage (Postgres)
+
+**Usage** — Table **`usage`**: one row per **client_id + UTC calendar date + channel** (`email`). `sent_count` increments on `/otp/send`; **`email-service`** increments `success_count` / `fail_count` after each SMTP attempt.
 
 | Key pattern | Purpose |
 |-------------|---------|
 | `rate:{client_id}:{YYYY-MM-DD-HH-MM}` | Per-client requests per UTC minute (default limit: **10**; `CLIENT_RATE_LIMIT`) |
 | `rate:{email}` / `rate:{ip}` | Legacy per-email and per-IP buckets |
 | `otp:lock:{email}` | Idempotency: block duplicate sends for 60s |
-| `usage:{client_id}:{YYYY-MM-DD}` | Daily send counter (TTL 7 days) |
 
 ---
 
@@ -185,7 +186,7 @@ curl -s -X POST "http://localhost:8101/otp/send?email=test@example.com" \
   -H "x-api-key: YOUR_RAW_API_KEY"
 ```
 
-Today’s usage for a client:
+Usage history for a client (newest dates first):
 
 ```bash
 curl -s "http://localhost:8101/admin/usage/CLIENT_UUID" \

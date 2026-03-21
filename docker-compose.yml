@@ -30,6 +30,7 @@ services:
       - "3000:3000"
     depends_on:
       - postgres
+      - redis
     env_file:
       - .env
     environment:
@@ -37,6 +38,8 @@ services:
       POSTGRES_DB: orbata
       POSTGRES_USER: orbata
       POSTGRES_PASSWORD: orbata
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       NODE_ENV: production
 
   redis:

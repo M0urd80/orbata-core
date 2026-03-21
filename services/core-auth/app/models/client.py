@@ -15,6 +15,9 @@ class Client(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     email_from_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     api_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    # Set on insert via default and explicitly in service layer (AdminJS / API creates).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

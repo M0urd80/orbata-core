@@ -7,6 +7,7 @@ from app.core.database import init_db_schema
 from app.middleware.api_key_middleware import ApiKeyMiddleware
 from app.models.client import Client  # noqa: F401
 from app.models.email_log import EmailLog  # noqa: F401
+from app.models.usage import Usage  # noqa: F401
 
 app = FastAPI(title="Orbata Core")
 app.add_middleware(ApiKeyMiddleware)

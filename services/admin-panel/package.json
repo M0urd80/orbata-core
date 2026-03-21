@@ -14,8 +14,10 @@
     "@adminjs/express": "^6.1.1",
     "@adminjs/sequelize": "^4.1.1",
     "adminjs": "^7.8.17",
+    "connect-redis": "^7.1.1",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
+    "redis": "^4.7.0",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",
     "sequelize": "^6.37.5"

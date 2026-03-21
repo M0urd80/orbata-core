@@ -20,13 +20,20 @@ def store_otp(identifier: str, otp: str):
     r.setex(f"otp:{identifier}", OTP_TTL, hashed)
 
 
-def publish_otp_event(email: str, otp: str, client_name: str, client_id: str):
+def publish_otp_event(
+    email: str,
+    otp: str,
+    client_name: str,
+    client_id: str,
+    log_id: str,
+):
     event = {
         "type": "OTP",
         "email": email,
         "otp": otp,
         "client_id": client_id,
         "client_name": client_name,
+        "log_id": log_id,
         "attempt": 0,
         "max_attempts": 3,
         "next_try_at": 0,

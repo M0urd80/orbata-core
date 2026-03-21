@@ -31,10 +31,16 @@ def create_client_with_api_key(
         name=name,
         api_key=hash_api_key(raw_api_key),
         email_from_name=branding,
+        created_at=datetime.utcnow(),
     )
     db.add(client)
-    db.commit()
-    db.refresh(client)
+    try:
+        db.flush()
+        db.commit()
+        db.refresh(client)
+    except Exception:
+        db.rollback()
+        raise
     return client, raw_api_key
 
 
@@ -58,6 +64,7 @@ def create_client_with_expiration(
         api_key=hash_api_key(raw_api_key),
         expires_at=expires_at,
         email_from_name=name,
+        created_at=datetime.utcnow(),
     )
     db.add(client)
     db.commit()

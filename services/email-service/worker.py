@@ -8,7 +8,8 @@ from email.mime.text import MIMEText
 
 import redis
 
-from email_log_writer import write_email_log
+from email_log_writer import update_email_log, write_email_log
+from usage_writer import record_email_delivery
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
 
@@ -98,6 +99,8 @@ def move_to_dlq(job, error):
 
 
 def process_job(job):
+    # New jobs use log_id; legacy jobs may still have email_log_id
+    log_id = job.get("log_id") or job.get("email_log_id")
     try:
         log_event(
             "email_processing",
@@ -113,13 +116,17 @@ def process_job(job):
             status="success",
             attempt=job.get("attempt", 0),
         )
-        write_email_log(
-            job.get("client_id"),
-            job["email"],
-            "success",
-            job.get("attempt", 0),
-            error_message=None,
-        )
+        if log_id:
+            update_email_log(log_id, "success")
+        else:
+            write_email_log(
+                job.get("client_id"),
+                job["email"],
+                "success",
+                job.get("attempt", 0),
+                error_message=None,
+            )
+        record_email_delivery(job.get("client_id"), success=True)
     except Exception as e:
         log_event(
             "email_failed",
@@ -128,13 +135,22 @@ def process_job(job):
             attempt=job.get("attempt", 0),
             error=str(e),
         )
-        write_email_log(
-            job.get("client_id"),
-            job.get("email", ""),
-            "failed",
-            job.get("attempt", 0),
-            error_message=str(e),
-        )
+        if log_id:
+            update_email_log(
+                log_id,
+                "failed",
+                increment_attempts=True,
+                error_message=str(e),
+            )
+        else:
+            write_email_log(
+                job.get("client_id"),
+                job.get("email", ""),
+                "failed",
+                job.get("attempt", 0),
+                error_message=str(e),
+            )
+        record_email_delivery(job.get("client_id"), success=False)
         if job["attempt"] < job["max_attempts"]:
             schedule_retry(job)
         else:

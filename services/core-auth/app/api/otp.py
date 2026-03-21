@@ -1,12 +1,15 @@
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Request, Body, Query
+from fastapi import APIRouter, HTTPException, Request, Body, Query, Depends
 from pydantic import BaseModel, EmailStr, constr
+from sqlalchemy.orm import Session
 import redis
-from app.services.otp_service import generate_otp, store_otp, publish_otp_event
+from app.core.database import get_db
+from app.services.otp_service import generate_otp, store_otp
+from app.services.email_log_service import create_pending_log_and_enqueue
 from app.services.verification_service import verify_otp
 from app.services.rate_limiter import check_rate_limit as check_email_ip_rate_limit
 from app.services.rate_limit_service import check_rate_limit as check_client_rate_limit
-from app.services.usage_service import increment_usage
+from app.services.usage_service import increment_sent
 
 router = APIRouter()
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
@@ -26,6 +29,7 @@ async def send_otp(
     request: Request,
     data: Optional[SendOTPRequest] = Body(default=None),
     email: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
 ):
     client_ctx = getattr(request.state, "client", None)
     if not client_ctx or not client_ctx.get("id"):
@@ -58,9 +62,15 @@ async def send_otp(
     otp = generate_otp()
     store_otp(email, otp)
     client_name = client_ctx.get("email_from_name") or client_ctx["name"]
-    publish_otp_event(email, otp, client_name, str(client_ctx["id"]))
+    create_pending_log_and_enqueue(
+        db,
+        recipient_email=email,
+        client_id=str(client_ctx["id"]),
+        otp=otp,
+        client_name=client_name,
+    )
 
-    increment_usage(str(client_ctx["id"]))
+    increment_sent(db, str(client_ctx["id"]))
 
     # TEMP DEBUG: return OTP for local testing only
     return {"message": "OTP sent", "otp": otp}

@@ -3,9 +3,10 @@
 Web UI for **Postgres** tables `clients` and `email_logs`.
 
 - **URL:** `http://localhost:3000/admin` (Compose uses **`3000:3000`**; use **`127.0.0.1:3000:3000`** in `docker-compose.yml` if you want localhost-only access).
-- **Auth:** Always **`buildAuthenticatedRouter`**. Set **`ADMIN_USER`** and **`ADMIN_PASSWORD`** in **`.env`** (also accepts legacy `ADMIN_PANEL_*`). Use long random values in production.
-- **Secrets:** Hashed API keys in DB are **hidden** in AdminJS list/show/filter/edit for `api_key`.
-- **DB startup:** Retries Postgres (**`DB_MAX_RETRIES`**, **`DB_RETRY_DELAY_MS`**) like core-auth.
+- **Auth:** **`buildAuthenticatedRouter`**. Set **`ADMIN_USER`** and **`ADMIN_PASSWORD`** in **`.env`**.
+- **Sessions:** **`connect-redis`** + **`redis`** (same Redis as core-auth). Env: **`REDIS_HOST`** (default `redis`), **`REDIS_PORT`** (default `6379`). Key prefix: `orbata:admin:sess:`.
+- **UI:** **Core → Customers**, **Monitoring → OTP Logs**; **`api_key`** hidden; **`id`** read-only on Customer; OTP logs sorted newest-first, filter **status** / **client_id**, search **email**.
+- **DB startup:** Retries Postgres and Redis (**`REDIS_MAX_RETRIES`**, **`REDIS_RETRY_DELAY_MS`**).
 
 Requires the same Postgres instance as **core-auth** (`orbata` / `orbata` / database `orbata`).
 

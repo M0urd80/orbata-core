@@ -7,10 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import ADMIN_SECRET
 from app.core.database import get_db
+from app.models.client import Client
 from app.models.email_log import EmailLog
 from app.schemas.client import ClientCreateRequest, ClientCreateResponse
 from app.services.api_key_service import create_client, rotate_api_key
-from app.services.usage_service import get_usage_today
+from app.services.usage_service import list_usage_for_client
 
 router = APIRouter()
 
@@ -28,9 +29,10 @@ def require_admin_secret(secret: str | None):
 def get_usage(
     client_id: str,
     x_admin_secret: str | None = Header(default=None),
+    db: Session = Depends(get_db),
 ):
     require_admin_secret(x_admin_secret)
-    return get_usage_today(client_id)
+    return list_usage_for_client(db, client_id)
 
 
 @router.get("/logs/{client_id}")
@@ -68,7 +70,20 @@ def create_client_endpoint(
     db: Session = Depends(get_db),
 ):
     require_admin_secret(x_admin_secret)
-    client_id, api_key = create_client(db, data.name, data.email_from_name)
+    try:
+        client_id, api_key = create_client(db, data.name, data.email_from_name)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not create client: {e!s}",
+        ) from e
+    persisted = db.get(Client, client_id)
+    if persisted is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Client was not persisted to the database",
+        )
     return {"client_id": str(client_id), "api_key": api_key}
 
 
