@@ -5,6 +5,10 @@ from app.api.otp import router as otp_router
 from app.api.admin import router as admin_router
 from app.core.database import init_db_schema
 from app.middleware.api_key_middleware import ApiKeyMiddleware
+from app.models.service import Service  # noqa: F401
+from app.models.plan import Plan  # noqa: F401
+from app.models.plan_quota import PlanQuota  # noqa: F401
+from app.models.quota import Quota  # noqa: F401
 from app.models.client import Client  # noqa: F401
 from app.models.email_log import EmailLog  # noqa: F401
 from app.models.usage import Usage  # noqa: F401

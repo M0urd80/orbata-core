@@ -1,25 +1,16 @@
 import json
 import logging
-import os
 import random
-import smtplib
 import time
-from email.mime.text import MIMEText
 
 import redis
 
+from app.providers.routing import resolve_channel_name, send_with_failover
+from db_session import SessionLocal
 from email_log_writer import update_email_log, write_email_log
 from usage_writer import record_email_delivery
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
-
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_LOGIN = os.getenv("SMTP_LOGIN")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-FROM_EMAIL = os.getenv("FROM_EMAIL")
-
-smtp_conn = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("email-worker")
@@ -36,46 +27,15 @@ def log_event(event: str, email: str = "", status: str = "", attempt: int = 0, *
     logger.info(json.dumps(payload))
 
 
-def get_smtp_connection():
-    global smtp_conn
-
-    if smtp_conn is None:
-        smtp_conn = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
-        smtp_conn.starttls()
-        smtp_conn.login(SMTP_LOGIN, SMTP_PASSWORD)
-        log_event("smtp_connected", status="success")
-
-    return smtp_conn
-
-
-def send_email(to_email, otp, client_name: str):
-    global smtp_conn
-
-    body = f"Your {client_name} verification code is: {otp}"
-    msg = MIMEText(body)
-    msg["Subject"] = "Your verification code"
-    msg["From"] = FROM_EMAIL
-    msg["To"] = to_email
-
-    try:
-        conn = get_smtp_connection()
-        conn.send_message(msg)
-    except Exception:
-        log_event("smtp_failed_reconnecting", email=to_email, status="retry")
-        smtp_conn = None
-        conn = get_smtp_connection()
-        conn.send_message(msg)
-
-
 def schedule_retry(job):
-    job["attempt"] += 1
+    job["attempt"] = int(job.get("attempt", 0)) + 1
 
     delay = (2 ** job["attempt"]) + random.randint(0, 2)
     job["next_try_at"] = int(time.time()) + delay
 
     log_event(
         "retry_scheduled",
-        email=job.get("email", ""),
+        email=job.get("to") or job.get("email", ""),
         status="retry",
         attempt=job["attempt"],
         delay=delay,
@@ -99,40 +59,86 @@ def move_to_dlq(job, error):
 
 
 def process_job(job):
-    # New jobs use log_id; legacy jobs may still have email_log_id
+    """
+    Email OTP → SMTP chain; SMS OTP → Twilio chain. Same retry / DLQ semantics.
+    """
     log_id = job.get("log_id") or job.get("email_log_id")
+    recipient = job.get("to") or job.get("email") or ""
+    attempt = int(job.get("attempt", 0))
+    max_attempts = int(job.get("max_attempts", 3))
+
+    db = SessionLocal()
     try:
+        logger.info(f"🔥 JOB RECEIVED: {job}")
         log_event(
             "email_processing",
-            email=job.get("email", ""),
+            email=recipient,
             status="processing",
-            attempt=job.get("attempt", 0),
+            attempt=attempt,
         )
         client_name = job.get("client_name") or "Orbata"
-        send_email(job["email"], job["otp"], client_name)
+        # Prefer explicit job["channel"]; if absent, resolve_channel_name (service → service_id → email).
+        if "channel" in job and job["channel"] is not None and str(job["channel"]).strip():
+            service = str(job["channel"]).strip().lower()
+        else:
+            service = resolve_channel_name(db, job)
+
+        if service in ("sms", "whatsapp"):
+            if not job.get("to") or not job.get("message"):
+                raise ValueError(
+                    "SMS/WhatsApp job requires non-empty 'to' and 'message'"
+                )
+            to_raw = str(job["to"]).strip()
+            if to_raw.lower().startswith("whatsapp:"):
+                to_norm = to_raw
+            else:
+                to_norm = to_raw.replace(" ", "").replace("-", "")
+            payload = {
+                "to": to_norm,
+                "message": str(job["message"]),
+                "channel": service,
+                "service": service,
+            }
+        else:
+            payload = {
+                "to": job.get("email") or job.get("to"),
+                "otp": job["otp"],
+                "client_name": client_name,
+                "channel": service,
+                "service": service,
+            }
+
+        provider_used, routing_mode = send_with_failover(db, service, payload)
         log_event(
             "email_sent",
-            email=job.get("email", ""),
+            email=recipient,
             status="success",
-            attempt=job.get("attempt", 0),
+            attempt=attempt,
+            provider=provider_used,
+            routing=routing_mode,
+            service=service,
         )
         if log_id:
             update_email_log(log_id, "success")
         else:
             write_email_log(
                 job.get("client_id"),
-                job["email"],
+                recipient,
                 "success",
-                job.get("attempt", 0),
+                attempt,
                 error_message=None,
             )
-        record_email_delivery(job.get("client_id"), success=True)
+        record_email_delivery(
+            job.get("client_id"),
+            success=True,
+            service_id=job.get("service_id"),
+        )
     except Exception as e:
         log_event(
             "email_failed",
-            email=job.get("email", ""),
+            email=recipient,
             status="failed",
-            attempt=job.get("attempt", 0),
+            attempt=attempt,
             error=str(e),
         )
         if log_id:
@@ -145,16 +151,22 @@ def process_job(job):
         else:
             write_email_log(
                 job.get("client_id"),
-                job.get("email", ""),
+                recipient,
                 "failed",
-                job.get("attempt", 0),
+                attempt,
                 error_message=str(e),
             )
-        record_email_delivery(job.get("client_id"), success=False)
-        if job["attempt"] < job["max_attempts"]:
+        record_email_delivery(
+            job.get("client_id"),
+            success=False,
+            service_id=job.get("service_id"),
+        )
+        if attempt < max_attempts:
             schedule_retry(job)
         else:
             move_to_dlq(job, e)
+    finally:
+        db.close()
 
 
 log_event("worker_started", status="success")

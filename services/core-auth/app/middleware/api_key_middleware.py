@@ -1,35 +1,30 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from datetime import datetime, timezone
 
 from app.core.database import SessionLocal
-from app.services.api_key_service import get_client_by_api_key
+from app.services.api_key_service import (
+    ClientAuthError,
+    require_client_from_api_key_header,
+)
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """
+    Early reject bad ``/otp`` requests. The handler re-resolves the client on ``get_db()``
+    so usage / quotas / logs use the same session-bound row as ``client.id``.
+    """
+
     async def dispatch(self, request: Request, call_next):
         if request.url.path.startswith("/otp"):
-            api_key = request.headers.get("x-api-key")
-            if not api_key:
-                return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
-
             db = SessionLocal()
             try:
-                client = get_client_by_api_key(db, api_key)
+                require_client_from_api_key_header(db, request)
+            except ClientAuthError as e:
+                return JSONResponse(
+                    status_code=e.status_code, content={"detail": e.detail}
+                )
             finally:
                 db.close()
-
-            if not client:
-                return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
-            if client.expires_at and client.expires_at < datetime.now(timezone.utc):
-                return JSONResponse(status_code=401, content={"detail": "API key expired"})
-
-            display_name = client.email_from_name or client.name
-            request.state.client = {
-                "id": str(client.id),
-                "name": client.name,
-                "email_from_name": display_name,
-            }
 
         return await call_next(request)

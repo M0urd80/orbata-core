@@ -8,7 +8,7 @@ Orbata Core is a lightweight authentication and OTP verification engine with API
 
 - **OTP** — Generate and verify email OTPs (hashed storage, TTL, max attempts)
 - **API keys** — Prefixed keys (`orb_live_…`), SHA-256 stored in DB; raw key shown only at create/rotate
-- **PostgreSQL** — `clients` table (id, name, hashed api_key, created_at, optional expiration/rotation metadata)
+- **PostgreSQL** — `clients` (required **`plan_id`** → `plans`, **`ON DELETE RESTRICT`**), hashed api_key, optional quota overrides, etc.
 - **Redis** — OTP storage, locks, email/IP rate buckets, **per-client** minute windows, usage counters, email queues
 - **Async email** — Core enqueues; worker sends via SMTP; retry with jitter + ZSET delay; DLQ with failure metadata
 - **Email audit** — `email_logs` in Postgres (per send: client, recipient, status, attempts, error, timestamp)
@@ -44,6 +44,24 @@ docker compose up --build
 | AdminJS UI  | `http://localhost:3000/admin` (Postgres: `clients`, `email_logs`) |
 | PostgreSQL  | `localhost:5432`  |
 | Redis       | `localhost:6379`  |
+
+### Database migrations (Alembic)
+
+Schema for **core-auth** is defined in SQLAlchemy models under `services/core-auth/app/models/`. [Alembic](https://alembic.sqlalchemy.org/) lives in `services/core-auth/alembic/` (see `alembic/README.md`).
+
+```bash
+cd services/core-auth
+export DATABASE_URL="postgresql+psycopg://orbata:orbata@localhost:5432/orbata"
+alembic revision --autogenerate -m "describe change"
+alembic upgrade head
+```
+
+`DATABASE_URL` must match the running Postgres (from `.env` or Compose).
+
+- **Docker:** **core-auth** runs **`alembic upgrade head`** before **uvicorn** (see `services/core-auth/Dockerfile`).
+- **Seeds / legacy fixes:** **`init_db_schema()`** still runs on startup but no longer calls **`create_all`** — schema is owned by Alembic.
+
+Rollback one migration: `alembic downgrade -1`.
 
 ---
 
@@ -87,19 +105,22 @@ Invalid secret → **403**.
 
 | Method | Path           | Auth        | Description |
 |--------|----------------|-------------|-------------|
-| `POST` | `/otp/send`    | `x-api-key` | Send OTP (JSON body and/or `?email=` query supported) |
-| `POST` | `/otp/verify`  | `x-api-key` | Verify OTP (JSON and/or `?email=&otp=` query supported) |
+| `POST` | `/otp/send`    | `x-api-key` | Send OTP: **exactly one** of **`email`** or **`sms`** (E.164, e.g. `+15551234567`) via JSON and/or `?email=` / `?sms=` |
+| `POST` | `/otp/verify`  | `x-api-key` | Verify OTP: same identifier (`email` or `sms`) + `otp` (JSON and/or query) |
 
-**Send** — Per-client rate limit (default 10/min per client), per-email/IP limits, idempotency lock (60s), then enqueue for email.
+**Send** — Per-client rate limit (default 10/min per client), per-identifier/IP limits, idempotency lock (60s). **Email** jobs → SMTP routing; **SMS** → Twilio routing (worker reads `email_delivery_providers` for `service = sms`).
 
-**Verify** — Validates 6-digit OTP; too many failures can return **429**.
+**Verify** — Validates 6-digit OTP against the same identifier used on send; too many failures can return **429**.
 
 ### Admin
 
 | Method | Path                           | Auth              | Description |
 |--------|--------------------------------|-------------------|-------------|
-| `POST` | `/admin/clients`               | `x-admin-secret`  | Create client; returns `client_id` + **raw `api_key` once** |
-| `GET`  | `/admin/usage/{client_id}`     | `x-admin-secret`  | Daily **Postgres** aggregates: `[{ date, sent_count, success_count, fail_count }, …]` (newest first) |
+| `POST` | `/admin/plans`                 | `x-admin-secret`  | Create plan (`name`, `price` default **0**). Limits: **`plan_quotas`** with **`service_id`** → **`services`** (seeded **email**, **sms**) |
+| `GET`  | `/admin/plans`                 | `x-admin-secret`  | List plans |
+| `DELETE` | `/admin/plans/{plan_id}`     | `x-admin-secret`  | Delete plan — **fails** if any **client** references it (`ON DELETE RESTRICT`) |
+| `POST` | `/admin/clients`               | `x-admin-secret`  | Create client; **required** **`plan_id`** (UUID); returns `client_id` + **raw `api_key` once** |
+| `GET`  | `/admin/usage/{client_id}`     | `x-admin-secret`  | Daily aggregates: `[{ client_id, client_name, service_id, service_name, date, sent, success, fail }, …]` (newest first) |
 | `GET`  | `/admin/logs/{client_id}`      | `x-admin-secret`  | Last **50** email send attempts for that client (Postgres), newest first |
 | `POST` | `/admin/clients/{id}/rotate`   | `x-admin-secret`  | Rotate API key; returns new raw key once |
 
@@ -107,7 +128,116 @@ Invalid secret → **403**.
 
 ## Rate limiting (Redis) and usage (Postgres)
 
-**Usage** — Table **`usage`**: one row per **client_id + UTC calendar date + channel** (`email`). `sent_count` increments on `/otp/send`; **`email-service`** increments `success_count` / `fail_count` after each SMTP attempt.
+**Usage** — Table **`usage`**: one row per **client_id + UTC calendar date + `service_id`**. `sent_count` increments on `/otp/send` for the **`email`** or **`sms`** service row (depending on channel); **`email-service`** bumps **`success_count` / `fail_count`** for that **`service_id`** (included in the Redis job payload).
+
+**Plans & quotas** — **`services`**: **`email`** + **`sms`** (auto-seeded on core-auth startup). **`plan_quotas`**: link each plan to quotas per channel. **`/otp/send`** resolves **`PlanQuota`** for the active channel. **AdminJS**: **Services**, **Plans**, **Plan quotas**, **Usage**. **`clients.quota_*`** override **email** caps only.
+
+*Existing databases* (if `create_all` did not add objects):
+
+```sql
+CREATE TABLE IF NOT EXISTS plans (
+  id UUID PRIMARY KEY,
+  name VARCHAR(255) NOT NULL UNIQUE,
+  price DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS services (
+  id UUID PRIMARY KEY,
+  name VARCHAR(64) NOT NULL UNIQUE,
+  description VARCHAR(512) NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS plan_quotas (
+  id UUID PRIMARY KEY,
+  plan_id UUID NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  service_id UUID NOT NULL REFERENCES services(id) ON DELETE RESTRICT,
+  quota_daily INTEGER NOT NULL DEFAULT 0,
+  quota_monthly INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (plan_id, service_id)
+);
+CREATE INDEX IF NOT EXISTS ix_plan_quotas_plan_id ON plan_quotas (plan_id);
+CREATE INDEX IF NOT EXISTS ix_plan_quotas_service_id ON plan_quotas (service_id);
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS plan_id UUID REFERENCES plans(id);
+UPDATE clients SET plan_id = (SELECT id FROM plans ORDER BY name LIMIT 1) WHERE plan_id IS NULL;
+-- plan_id may stay NULL (assign later in Admin). OTP returns 400 until a plan is set.
+-- To force NOT NULL after backfilling: ALTER TABLE clients ALTER COLUMN plan_id SET NOT NULL;
+ALTER TABLE clients DROP CONSTRAINT IF EXISTS clients_plan_id_fkey;
+ALTER TABLE clients ADD CONSTRAINT clients_plan_id_fkey
+  FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS ix_clients_plan_id ON clients (plan_id);
+-- Per-client quota columns removed; caps are only in plan_quotas (plan + service).
+ALTER TABLE clients DROP COLUMN IF EXISTS quota_daily;
+ALTER TABLE clients DROP COLUMN IF EXISTS quota_monthly;
+CREATE TABLE IF NOT EXISTS usage (
+  id UUID PRIMARY KEY,
+  client_id UUID NOT NULL,
+  date DATE NOT NULL,
+  service_id UUID NOT NULL REFERENCES services(id) ON DELETE RESTRICT,
+  sent_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (client_id, date, service_id)
+);
+CREATE INDEX IF NOT EXISTS ix_usage_client_id ON usage (client_id);
+CREATE INDEX IF NOT EXISTS ix_usage_service_id ON usage (service_id);
+```
+
+**Migrate `usage.channel` (string) → `service_id` (FK):**
+
+```sql
+ALTER TABLE usage ADD COLUMN IF NOT EXISTS service_id UUID REFERENCES services(id);
+UPDATE usage u
+SET service_id = s.id
+FROM services s
+WHERE u.service_id IS NULL AND s.name = u.channel;
+ALTER TABLE usage DROP COLUMN IF EXISTS channel;
+ALTER TABLE usage ALTER COLUMN service_id SET NOT NULL;
+DROP INDEX IF EXISTS uq_usage_client_date_channel;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_client_date_service_id ON usage (client_id, date, service_id);
+```
+
+**Migrate `plan_quotas.service` (string) → `service_id` (FK):**
+
+```sql
+INSERT INTO services (id, name, description, created_at)
+SELECT gen_random_uuid(), v.name, NULL, now()
+FROM (VALUES ('email'), ('sms')) AS v(name)
+WHERE NOT EXISTS (SELECT 1 FROM services s WHERE s.name = v.name);
+
+ALTER TABLE plan_quotas ADD COLUMN IF NOT EXISTS service_id UUID REFERENCES services(id);
+UPDATE plan_quotas pq
+SET service_id = s.id
+FROM services s
+WHERE pq.service_id IS NULL AND s.name = pq.service;
+ALTER TABLE plan_quotas DROP COLUMN IF EXISTS service;
+ALTER TABLE plan_quotas ALTER COLUMN service_id SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_quota_plan_service_id ON plan_quotas (plan_id, service_id);
+```
+
+**Migrate old `plans.quota_*` into `plan_quotas` (email service), then drop legacy columns:**
+
+```sql
+-- Ensure `services` + `email` row exist (see seed or INSERT above).
+INSERT INTO plan_quotas (id, plan_id, service_id, quota_daily, quota_monthly)
+SELECT gen_random_uuid(), p.id, s.id, p.quota_daily, p.quota_monthly
+FROM plans p
+CROSS JOIN services s
+WHERE s.name = 'email'
+  AND NOT EXISTS (
+    SELECT 1 FROM plan_quotas pq
+    WHERE pq.plan_id = p.id AND pq.service_id = s.id
+  );
+-- optional: ALTER TABLE plans DROP COLUMN IF EXISTS quota_daily, DROP COLUMN IF EXISTS quota_monthly;
+```
+
+**Keep data, fix `plans` defaults (Postgres):**
+
+```sql
+ALTER TABLE plans ALTER COLUMN created_at SET DEFAULT now();
+ALTER TABLE plans ALTER COLUMN price SET DEFAULT 0;
+UPDATE plans SET created_at = now() WHERE created_at IS NULL;
+UPDATE plans SET price = 0 WHERE price IS NULL;
+```
 
 | Key pattern | Purpose |
 |-------------|---------|
@@ -127,6 +257,20 @@ Invalid secret → **403**.
 
 Retries use exponential backoff **+ jitter**. A separate **email-retry** container moves due jobs from the ZSET back to `email_queue`.
 
+### Multi-provider routing (failover)
+
+The email worker loads **`email_delivery_providers`** from Postgres: filter **`is_active`**, match **`service`** to the channel name (from the job’s **`service_id`** → **`services.name`**, e.g. `email`), order by **`priority` ASC** (lower = tried first). It calls **`send()`** on each implementation in order; **first success wins**. If **all** providers fail for that processing attempt, the job is retried / **DLQ**’d like any other failure.
+
+| Column | Purpose |
+|--------|---------|
+| `service` | Same string as **`services.name`** (`email`, …) |
+| `priority` | Integer; lower value = earlier in failover chain |
+| `is_active` | Inactive rows are skipped |
+| `provider_kind` | `smtp` / `smtp_env` / `brevo` → SMTP; **`twilio`** → SMS (Twilio REST); **`dummy`** → log-only SMS (dev / failover) |
+| `config` | Optional JSON: SMTP keys above, or Twilio: `account_sid`, `auth_token`, `from_number` / `phone_number` |
+
+**SQL:** `services/email-service/sql/create_email_delivery_providers.sql` (new DBs). Existing DBs: run **`alter_email_delivery_providers_kind_config.sql`**. Seed SMS row: **`services/email-service/sql/seed_sms_twilio_provider.sql`**. If **no rows** exist for **`email`**, the worker uses **env SMTP**; for **`sms`**, **env Twilio** (`TWILIO_*`).
+
 ---
 
 ## Environment variables
@@ -141,6 +285,14 @@ SMTP_PORT=587
 SMTP_LOGIN=your_smtp_login
 SMTP_PASSWORD=your_smtp_key
 FROM_EMAIL=no-reply@yourdomain.com
+```
+
+**Twilio (SMS OTP — same worker container)**
+
+```env
+TWILIO_ACCOUNT_SID=ACxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_PHONE_NUMBER=+15551234567
 ```
 
 **Admin**
@@ -170,19 +322,29 @@ Use the same **`DATABASE_URL`** for **core-auth** and **email-service** so the w
 
 ## Testing (examples)
 
-Create a client (save the returned `api_key`):
+Create a plan, then a client on that plan (save the returned `api_key`):
 
 ```bash
+curl -s -X POST "http://localhost:8101/admin/plans" \
+  -H "Content-Type: application/json" \
+  -H "x-admin-secret: YOUR_ADMIN_SECRET" \
+  -d "{\"name\": \"Free\", \"price\": 0}"
+
+# Add email quotas in AdminJS (Plan quotas) or SQL, e.g. plan_id + service email + quota_daily 100
+
 curl -s -X POST "http://localhost:8101/admin/clients" \
   -H "Content-Type: application/json" \
   -H "x-admin-secret: YOUR_ADMIN_SECRET" \
-  -d "{\"name\": \"My App\"}"
+  -d "{\"name\": \"My App\", \"plan_id\": \"PLAN_UUID_HERE\"}"
 ```
 
-Send OTP (query param):
+Send OTP (email or SMS, query param):
 
 ```bash
 curl -s -X POST "http://localhost:8101/otp/send?email=test@example.com" \
+  -H "x-api-key: YOUR_RAW_API_KEY"
+
+curl -s -X POST "http://localhost:8101/otp/send?sms=%2B15551234567" \
   -H "x-api-key: YOUR_RAW_API_KEY"
 ```
 

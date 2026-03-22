@@ -4,3 +4,4 @@ redis
 email-validator
 sqlalchemy
 psycopg[binary]
+alembic>=1.13.0

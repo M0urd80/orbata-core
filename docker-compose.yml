@@ -4,25 +4,40 @@ services:
     ports:
       - "8101:8000"
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
 
   email-service:
     build: ./services/email-service
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      # Same DB as core-auth (provider routing reads ``email_delivery_providers``).
+      DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
 
   email-retry:
     build: ./services/email-service
     command: ["python", "retry_worker.py"]
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
 
   admin-panel:
     build: ./services/admin-panel
@@ -31,9 +46,14 @@ services:
     depends_on:
       - postgres
       - redis
+      - core-auth
     env_file:
       - .env
     environment:
+      # Host MUST be Compose service name `postgres` (never localhost / 127.0.0.1).
+      # Same DB as core-auth: database=orbata user=orbata
+      ADMIN_DATABASE_URL: postgresql://orbata:orbata@postgres:5432/orbata
+      DATABASE_URL: postgresql://orbata:orbata@postgres:5432/orbata
       POSTGRES_HOST: postgres
       POSTGRES_DB: orbata
       POSTGRES_USER: orbata
@@ -41,6 +61,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       NODE_ENV: production
+      # Optional UUID: when set, new AdminJS clients without a plan get this plan_id
+      # DEFAULT_CLIENT_PLAN_ID: 00000000-0000-0000-0000-000000000000
 
   redis:
     image: redis:7
@@ -55,8 +77,13 @@ services:
       POSTGRES_DB: orbata
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U orbata"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+volumes:
+  postgres_data:

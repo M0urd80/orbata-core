@@ -1,0 +1,5 @@
+-- Plan ↔ reusable quota link: UNIQUE (plan_id, quota_id)
+-- SQLAlchemy model name: uq_plan_quota_plan_quota_id
+--
+-- Legacy installs may still have uq_plan_quota_plan_service_id; migration in
+-- database.py moves data to ``quotas`` and drops the old shape.
