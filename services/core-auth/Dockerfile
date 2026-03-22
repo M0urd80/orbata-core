@@ -3,9 +3,12 @@ FROM python:3.11
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Apply migrations then start API (fresh DB → tables + email_delivery_providers from Alembic).
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+RUN chmod +x docker-entrypoint.sh
+
+# Migrations first; on failure entrypoint exits 1 with a clear log (see docker-entrypoint.sh).
+ENTRYPOINT ["./docker-entrypoint.sh"]

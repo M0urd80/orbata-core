@@ -8,6 +8,36 @@ from email_log_model import EmailLog
 logger = logging.getLogger("email-worker")
 
 
+def is_already_delivered(log_id: str) -> bool:
+    """
+    Idempotency for OTP jobs: if this log was already successfully delivered, skip send.
+
+    Uses ``delivered`` when present, and treats ``status == 'success'`` as delivered for
+    legacy rows (before ``delivered`` column exists — if column missing, query may fail;
+    run ``alter_email_logs_delivered.sql``).
+    """
+    try:
+        lid = uuid.UUID(log_id)
+    except (ValueError, TypeError):
+        return False
+
+    db = SessionLocal()
+    try:
+        row = db.get(EmailLog, lid)
+        if row is None:
+            return False
+        if getattr(row, "status", None) == "success":
+            return True
+        if bool(getattr(row, "delivered", False)):
+            return True
+        return False
+    except Exception as e:
+        logger.warning("is_already_delivered check failed for id=%s: %s", log_id, e)
+        return False
+    finally:
+        db.close()
+
+
 def update_email_log(
     log_id: str,
     status: str,
@@ -35,6 +65,8 @@ def update_email_log(
             row.error_message = error_message
         elif status == "success":
             row.error_message = None
+        if status == "success":
+            row.delivered = True
         db.commit()
     except Exception as e:
         db.rollback()

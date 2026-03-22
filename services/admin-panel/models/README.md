@@ -21,7 +21,7 @@ Every model uses:
 - `timestamps: false` (columns are explicit; no `createdAt` / `updatedAt` inference)
 - `freezeTableName: true` (per model + default in `db.js`) — no pluralization of names
 
-Connection string: **`ADMIN_DATABASE_URL`** (preferred) or **`DATABASE_URL`**, normalized so SQLAlchemy URLs like `postgresql+psycopg://` become `postgres://` for Sequelize. In Docker Compose use **`postgresql://orbata:orbata@postgres:5432/orbata`** (host **`postgres`**, not `localhost`).
+Connection string: **`ADMIN_DATABASE_URL`** (preferred) or **`DATABASE_URL`**, normalized so SQLAlchemy URLs like `postgresql+psycopg://` become `postgres://` for Sequelize. In Docker Compose use **`postgresql+psycopg://orbata:orbata@postgres:5432/orbata`** (host **`postgres`**, not `localhost`).
 
 **Verify from the admin container** (tables should list — if “No relations”, wrong DB URL). The Node image has no `psql` until you install the client:
 

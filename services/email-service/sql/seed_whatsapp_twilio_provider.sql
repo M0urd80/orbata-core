@@ -1,4 +1,4 @@
--- WhatsApp via Twilio (sandbox / production number in ``from_number``).
+-- WhatsApp via Twilio: ``from_number`` must be a WhatsApp-enabled sender (DB-only; no env fallback).
 
 INSERT INTO email_delivery_providers (
     name, service, priority, is_active, provider_kind, config

@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS email_delivery_providers (
     priority INTEGER NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT true,
     provider_kind VARCHAR(64) NOT NULL DEFAULT 'smtp',
-    config JSONB NULL
+    config JSONB NULL,
+    CONSTRAINT uq_email_delivery_providers_service_name UNIQUE (service, name)
 );
 
 CREATE INDEX IF NOT EXISTS ix_email_delivery_providers_service

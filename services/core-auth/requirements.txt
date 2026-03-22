@@ -3,5 +3,6 @@ uvicorn
 redis
 email-validator
 sqlalchemy
-psycopg[binary]
+# Postgres driver for SQLAlchemy (psycopg v3). DATABASE_URL must use postgresql+psycopg://
+psycopg[binary]>=3.2,<4
 alembic>=1.13.0

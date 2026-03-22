@@ -18,7 +18,7 @@ def build_provider_from_kind(
     Map DB ``provider_kind`` to implementation.
 
     - ``smtp`` (and legacy ``smtp_env``, ``brevo``) → ``BrevoProvider``
-    - ``twilio`` → ``TwilioProvider``
+    - ``twilio`` → ``TwilioProvider`` (requires ``from_number`` in config)
     - ``dummy`` → ``DummySMSProvider`` (log-only; use as SMS failover)
     """
     kind = (provider_kind or "smtp").strip().lower()
@@ -34,10 +34,11 @@ def build_provider_from_kind(
 
 def get_provider(service: str = "email") -> BaseProvider:
     """
-    Single default provider from env (no DB). Prefer ``routing.send_with_failover`` in the worker.
+    Deprecated: outbound routing is DB-only via ``routing.send_with_failover``.
+
+    There is no ENV-based default provider anymore.
     """
-    if service == "email":
-        return BrevoProvider(smtp_config=None, label="legacy_env")
-    if service == "sms":
-        return TwilioProvider(config={}, label="legacy_env")
-    raise ValueError(f"No provider registered for service={service!r}")
+    raise RuntimeError(
+        f"No providers configured for service {service!r}: "
+        "use rows in email_delivery_providers and send_with_failover() (get_provider removed)"
+    )

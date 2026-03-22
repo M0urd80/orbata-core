@@ -2,6 +2,7 @@
 Alembic environment for core-auth.
 
 Run from ``services/core-auth`` with ``DATABASE_URL`` set (same as the app).
+Plain ``postgresql://`` in the environment is coerced to ``postgresql+psycopg://`` in ``get_url()``.
 """
 from __future__ import annotations
 
@@ -39,7 +40,12 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return os.environ.get("DATABASE_URL", DATABASE_URL)
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        url = DATABASE_URL
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://")
+    return url
 
 
 def run_migrations_offline() -> None:

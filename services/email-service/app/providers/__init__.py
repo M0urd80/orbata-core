@@ -1,3 +1,4 @@
+from app.providers.errors import ProviderError
 from app.providers.brevo_provider import BrevoProvider
 from app.providers.dummy_sms_provider import DummySMSProvider
 from app.providers.email_provider import EmailProvider
@@ -12,6 +13,7 @@ from app.providers.routing import (
 from app.providers.twilio_provider import TwilioProvider
 
 __all__ = [
+    "ProviderError",
     "BaseProvider",
     "BrevoProvider",
     "DummySMSProvider",

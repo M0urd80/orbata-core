@@ -1,13 +1,17 @@
 import json
 import logging
 import random
+import sys
 import time
 
 import redis
+from sqlalchemy import func, select
 
+from app.models.provider import DeliveryProvider
+from app.providers.errors import ProviderError
 from app.providers.routing import resolve_channel_name, send_with_failover
 from db_session import SessionLocal
-from email_log_writer import update_email_log, write_email_log
+from email_log_writer import is_already_delivered, update_email_log, write_email_log
 from usage_writer import record_email_delivery
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True)
@@ -70,6 +74,17 @@ def process_job(job):
     db = SessionLocal()
     try:
         logger.info(f"🔥 JOB RECEIVED: {job}")
+
+        if log_id and is_already_delivered(log_id):
+            log_event(
+                "delivery_skipped_idempotent",
+                email=recipient,
+                status="skipped",
+                attempt=attempt,
+                log_id=log_id,
+            )
+            return
+
         log_event(
             "email_processing",
             email=recipient,
@@ -108,31 +123,74 @@ def process_job(job):
                 "service": service,
             }
 
-        provider_used, routing_mode = send_with_failover(db, service, payload)
-        log_event(
-            "email_sent",
-            email=recipient,
-            status="success",
-            attempt=attempt,
-            provider=provider_used,
-            routing=routing_mode,
-            service=service,
-        )
-        if log_id:
-            update_email_log(log_id, "success")
-        else:
-            write_email_log(
-                job.get("client_id"),
-                recipient,
-                "success",
-                attempt,
-                error_message=None,
+        try:
+            provider_used, routing_mode = send_with_failover(db, service, payload)
+        except ProviderError as e:
+            log_event(
+                "email_failed",
+                email=recipient,
+                status="failed",
+                attempt=attempt,
+                error=str(e),
+                retryable=True,
             )
-        record_email_delivery(
-            job.get("client_id"),
-            success=True,
-            service_id=job.get("service_id"),
-        )
+            if log_id:
+                update_email_log(
+                    log_id,
+                    "failed",
+                    increment_attempts=True,
+                    error_message=str(e),
+                )
+            else:
+                write_email_log(
+                    job.get("client_id"),
+                    recipient,
+                    "failed",
+                    attempt,
+                    error_message=str(e),
+                )
+            record_email_delivery(
+                job.get("client_id"),
+                success=False,
+                service_id=job.get("service_id"),
+            )
+            if attempt < max_attempts:
+                schedule_retry(job)
+            else:
+                move_to_dlq(job, e)
+            return
+
+        try:
+            log_event(
+                "email_sent",
+                email=recipient,
+                status="success",
+                attempt=attempt,
+                provider=provider_used,
+                routing=routing_mode,
+                service=service,
+            )
+            if log_id:
+                update_email_log(log_id, "success")
+            else:
+                write_email_log(
+                    job.get("client_id"),
+                    recipient,
+                    "success",
+                    attempt,
+                    error_message=None,
+                )
+            record_email_delivery(
+                job.get("client_id"),
+                success=True,
+                service_id=job.get("service_id"),
+            )
+        except Exception as book_e:
+            logger.error(
+                "⚠️ post-delivery bookkeeping failed BUT delivery succeeded: %s",
+                book_e,
+            )
+
     except Exception as e:
         log_event(
             "email_failed",
@@ -140,6 +198,7 @@ def process_job(job):
             status="failed",
             attempt=attempt,
             error=str(e),
+            retryable=False,
         )
         if log_id:
             update_email_log(
@@ -161,13 +220,44 @@ def process_job(job):
             success=False,
             service_id=job.get("service_id"),
         )
-        if attempt < max_attempts:
-            schedule_retry(job)
-        else:
-            move_to_dlq(job, e)
+        move_to_dlq(job, e)
     finally:
         db.close()
 
+
+def _require_active_delivery_providers() -> None:
+    """Fail fast if the registry has no active rows (routing is DB-only)."""
+    db = SessionLocal()
+    try:
+        n = db.scalar(
+            select(func.count())
+            .select_from(DeliveryProvider)
+            .where(DeliveryProvider.is_active.is_(True))
+        )
+        if not n:
+            logger.critical(
+                "FATAL: no active rows in email_delivery_providers — run SQL seeds "
+                "(seed_sms_twilio_provider.sql, seed_whatsapp_twilio_provider.sql, "
+                "seed_email_smtp_provider.sql) then restart."
+            )
+            sys.exit(1)
+        logger.info(
+            "%s",
+            json.dumps(
+                {
+                    "event": "worker_startup_providers",
+                    "active_provider_rows": int(n),
+                }
+            ),
+        )
+    finally:
+        db.close()
+
+
+try:
+    _require_active_delivery_providers()
+except Exception as e:
+    logger.warning("Skipping provider check (e.g. DB or table not ready): %s", e)
 
 log_event("worker_started", status="success")
 

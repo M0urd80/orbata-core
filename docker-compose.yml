@@ -1,4 +1,17 @@
 services:
+  # One-shot: exits 0 after migrations. Email workers use service_completed_successfully
+  # (the long-running `core-auth` API never exits, so it cannot satisfy that condition).
+  core-auth-migrations:
+    build: ./services/core-auth
+    command: ["sh", "-c", "alembic upgrade head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
+
   core-auth:
     build: ./services/core-auth
     ports:
@@ -8,9 +21,12 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      core-auth-migrations:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
+      # Same Postgres for all app services (host = Compose service name `postgres`).
       DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
 
   email-service:
@@ -20,10 +36,11 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      core-auth-migrations:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
-      # Same DB as core-auth (provider routing reads ``email_delivery_providers``).
       DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
 
   email-retry:
@@ -34,6 +51,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      core-auth-migrations:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -50,10 +69,8 @@ services:
     env_file:
       - .env
     environment:
-      # Host MUST be Compose service name `postgres` (never localhost / 127.0.0.1).
-      # Same DB as core-auth: database=orbata user=orbata
-      ADMIN_DATABASE_URL: postgresql://orbata:orbata@postgres:5432/orbata
-      DATABASE_URL: postgresql://orbata:orbata@postgres:5432/orbata
+      ADMIN_DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
+      DATABASE_URL: postgresql+psycopg://orbata:orbata@postgres:5432/orbata
       POSTGRES_HOST: postgres
       POSTGRES_DB: orbata
       POSTGRES_USER: orbata

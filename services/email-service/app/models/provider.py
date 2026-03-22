@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, Integer, String, text
+from sqlalchemy import Boolean, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +22,9 @@ class DeliveryProvider(Base):
     """
 
     __tablename__ = "email_delivery_providers"
+    __table_args__ = (
+        UniqueConstraint("service", "name", name="uq_email_delivery_providers_service_name"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

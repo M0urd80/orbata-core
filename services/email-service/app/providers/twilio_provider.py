@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
@@ -13,14 +14,16 @@ logger = logging.getLogger("email-worker.twilio")
 
 class TwilioProvider(BaseProvider):
     """
-    SMS / WhatsApp via ``twilio.rest.Client``. Payload::
+    SMS / WhatsApp via Twilio. **Fully DB-configured for ``from_number``** (no env fallback).
 
-        { "to": str, "message": str, "service": str, "channel": str }
+    Payload::
 
-    When ``service`` / ``channel`` is ``whatsapp``, ``to`` is forced to ``whatsapp:+E164``
-    (Twilio otherwise treats a bare E.164 as SMS). Logs ``To=whatsapp:+...`` before ``create``.
+        { "to": str, "message": str, "service": str (or "channel") }
 
-    ``from_`` comes from merged config key ``from_number`` (DB JSON) or ``TWILIO_PHONE_NUMBER`` env.
+    - **sms**: ``to`` must be E.164 (no ``whatsapp:`` prefix).
+    - **whatsapp**: ``to`` must start with ``whatsapp:`` (caller formats; this class does not modify ``to``).
+
+    ``account_sid`` / ``auth_token`` may come from config or env (warning logged if env).
     """
 
     def __init__(
@@ -31,27 +34,36 @@ class TwilioProvider(BaseProvider):
     ) -> None:
         self._label = label
         self._config: dict[str, Any] = dict(config) if isinstance(config, dict) else {}
-        sid = self._config.get("account_sid") or os.getenv("TWILIO_ACCOUNT_SID")
-        token = self._config.get("auth_token") or os.getenv("TWILIO_AUTH_TOKEN")
+
+        sid = self._config.get("account_sid")
+        if not sid:
+            sid = os.getenv("TWILIO_ACCOUNT_SID")
+            if sid:
+                logger.warning(
+                    "Twilio account_sid for %r loaded from TWILIO_ACCOUNT_SID env (prefer DB config)",
+                    self._label,
+                )
+        token = self._config.get("auth_token")
+        if not token:
+            token = os.getenv("TWILIO_AUTH_TOKEN")
+            if token:
+                logger.warning(
+                    "Twilio auth_token for %r loaded from TWILIO_AUTH_TOKEN env (prefer DB config)",
+                    self._label,
+                )
         if not sid or not token:
             raise RuntimeError(
                 f"Twilio credentials missing for {self._label!r} "
-                "(config account_sid/auth_token or TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)"
+                "(set account_sid/auth_token in DB config or TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)"
             )
         self._client = Client(sid, token)
 
-    def _from_number(self) -> str:
-        fn = (
-            self._config.get("from_number")
-            or self._config.get("phone_number")
-            or os.getenv("TWILIO_PHONE_NUMBER")
-        )
-        if not fn:
-            raise RuntimeError(
-                f"from_number missing for {self._label!r} "
-                "(set in provider config JSON or TWILIO_PHONE_NUMBER)"
+        fn = self._config.get("from_number")
+        if not fn or not str(fn).strip():
+            raise ValueError(
+                f"from_number is required for TwilioProvider {self._label!r} (set in DB config JSON)"
             )
-        return str(fn)
+        self._from_number_value = str(fn).strip()
 
     def send(self, payload: dict[str, Any]) -> None:
         service = (
@@ -59,23 +71,32 @@ class TwilioProvider(BaseProvider):
             .strip()
             .lower()
         )
-        to_raw = str(payload["to"]).strip()
-        if service == "whatsapp":
-            if to_raw.lower().startswith("whatsapp:"):
-                to_addr = to_raw
-            else:
-                clean = to_raw.replace(" ", "").replace("-", "")
-                to_addr = f"whatsapp:{clean}"
-        elif to_raw.lower().startswith("whatsapp:"):
-            to_addr = to_raw
-        else:
-            to_addr = to_raw.replace(" ", "").replace("-", "")
+        to_addr = str(payload["to"]).strip()
         message = payload["message"]
-        from_number = self._from_number()
+
+        if service == "whatsapp":
+            if not to_addr.lower().startswith("whatsapp:"):
+                raise ValueError(
+                    "WhatsApp requires 'to' with 'whatsapp:' prefix (e.g. whatsapp:+21658767023)"
+                )
+        elif service == "sms":
+            if to_addr.lower().startswith("whatsapp:"):
+                raise ValueError(
+                    "SMS service requires E.164 'to' without 'whatsapp:' prefix"
+                )
+
+        from_number = self._from_number_value
         logger.info(
-            "Twilio messages.create To=%s (service=%s)",
-            to_addr,
-            service or "sms",
+            "%s",
+            json.dumps(
+                {
+                    "event": "twilio_send",
+                    "provider": self._label,
+                    "service": service or "unknown",
+                    "from": from_number,
+                    "to": to_addr,
+                }
+            ),
         )
         msg = self._client.messages.create(
             body=str(message),
