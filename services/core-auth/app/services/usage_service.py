@@ -95,21 +95,22 @@ def increment_sent(db: Session, client_id: str, *, service_id: uuid.UUID) -> Non
     """Upsert: +1 sent_count for (client, UTC date, service_id)."""
     cid = _parse_client_id(client_id)
     today = utc_today()
-    stmt = (
-        pg_insert(Usage)
-        .values(
-            id=uuid.uuid4(),
-            client_id=cid,
-            date=today,
-            service_id=service_id,
-            sent_count=1,
-            success_count=0,
-            fail_count=0,
-        )
-        .on_conflict_do_update(
-            constraint="uq_usage_client_date_service_id",
-            set_={"sent_count": Usage.sent_count + 1},
-        )
+    stmt = pg_insert(Usage).values(
+        id=uuid.uuid4(),
+        client_id=cid,
+        date=today,
+        service_id=service_id,
+        sent_count=1,
+        success_count=0,
+        fail_count=0,
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_usage_client_date_service_id",
+        set_={
+            "sent_count": Usage.sent_count + stmt.excluded.sent_count,
+            "success_count": Usage.success_count + stmt.excluded.success_count,
+            "fail_count": Usage.fail_count + stmt.excluded.fail_count,
+        },
     )
     db.execute(stmt)
     db.commit()

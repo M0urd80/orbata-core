@@ -3,7 +3,7 @@ services:
   # (the long-running `core-auth` API never exits, so it cannot satisfy that condition).
   core-auth-migrations:
     build: ./services/core-auth
-    command: ["sh", "-c", "alembic upgrade head"]
+    entrypoint: ["sh", "-c", "alembic upgrade head"]
     depends_on:
       postgres:
         condition: service_healthy

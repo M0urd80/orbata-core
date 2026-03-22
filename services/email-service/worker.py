@@ -124,7 +124,9 @@ def process_job(job):
             }
 
         try:
-            provider_used, routing_mode = send_with_failover(db, service, payload)
+            provider_used, routing_mode = send_with_failover(
+                db, service, payload, job=job
+            )
         except ProviderError as e:
             log_event(
                 "email_failed",

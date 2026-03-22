@@ -26,6 +26,48 @@ SERVICE_NAME_EMAIL = "email"
 SERVICE_NAME_SMS = "sms"
 SERVICE_NAME_WHATSAPP = "whatsapp"
 
+# Cross-channel failover: if every provider for the first service fails, try the next.
+FALLBACK_CHAIN: dict[str, list[str]] = {
+    SERVICE_NAME_WHATSAPP: [SERVICE_NAME_WHATSAPP, SERVICE_NAME_SMS, SERVICE_NAME_EMAIL],
+    SERVICE_NAME_SMS: [SERVICE_NAME_SMS, SERVICE_NAME_WHATSAPP, SERVICE_NAME_EMAIL],
+    SERVICE_NAME_EMAIL: [SERVICE_NAME_EMAIL],
+}
+
+
+def _fallback_services(requested: str) -> list[str]:
+    key = str(requested).strip().lower()
+    chain = FALLBACK_CHAIN.get(key)
+    if chain is not None:
+        return list(chain)
+    return [key]
+
+
+def _payload_for_service(
+    svc: str,
+    payload: dict[str, Any],
+    job: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Copy payload and set channel/service; enrich email sends when falling back from SMS/WA."""
+    out: dict[str, Any] = {**payload}
+    svc_norm = str(svc).strip().lower()
+    out["channel"] = svc_norm
+    out["service"] = svc_norm
+    # Twilio SMS expects E.164 (+...), not whatsapp:+... (WA addressing).
+    if svc_norm == SERVICE_NAME_SMS:
+        raw_to = out.get("to")
+        if isinstance(raw_to, str):
+            prefix = "whatsapp:"
+            if raw_to.lower().startswith(prefix):
+                out["to"] = raw_to[len(prefix) :].lstrip()
+    if svc_norm == SERVICE_NAME_EMAIL and job is not None:
+        if out.get("otp") is None and job.get("otp") is not None:
+            out["otp"] = job["otp"]
+        if not out.get("client_name") and job.get("client_name"):
+            out["client_name"] = job["client_name"]
+        if not out.get("to"):
+            out["to"] = job.get("email") or job.get("to")
+    return out
+
 
 def _lookup_service_name(db: Session, service_id_raw: Any) -> str:
     """Map ``service_id`` UUID → ``services.name``; default ``email`` (never ``sms``)."""
@@ -151,32 +193,34 @@ def send_with_failover(
     db: Session,
     service_name: str,
     payload: dict[str, Any],
+    job: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
-    Try each active provider in priority order until one succeeds.
+    Try providers in :data:`FALLBACK_CHAIN` order (cross-channel failover).
+
+    For each service in the chain, load active rows from ``email_delivery_providers`` and
+    try in priority order until one succeeds.
 
     Returns ``(provider_used_label, "db")``. Routing is DB-only (no env fallback).
 
-    Raises :class:`RuntimeError` if there are no active providers for the service.
+    Raises :class:`RuntimeError` if there are no active providers for **any** service in the chain.
     Raises :class:`ProviderError` if every configured provider fails (worker may retry that only).
 
     Provider rows are chosen only by the string ``email_delivery_providers.service`` (see
     :func:`fetch_active_providers_for_service`), not by ``service_id`` joins.
     """
-    service = str(service_name).strip().lower()
-    logger.info("🔁 Routing start → service=%s", service)
-    rows = fetch_active_providers_for_service(db, service)
-    if not rows:
-        raise RuntimeError(
-            "No active providers for service %r — add rows to email_delivery_providers"
-            % (service,)
-        )
+    requested = str(service_name).strip().lower()
+    chain = _fallback_services(requested)
+    logger.info("🔁 Routing start → requested=%s, fallback_chain=%s", requested, chain)
+
     errors: list[str] = []
     last_exc: BaseException | None = None
+    saw_any_provider = False
+    total_attempts = 0
 
-    def _safe_record_success(provider_name: str) -> None:
+    def _safe_record_success(provider_name: str, health_service: str) -> None:
         try:
-            health = record_success(db, provider_name, service)
+            health = record_success(db, provider_name, health_service)
             logger.info(
                 "📊 Provider health → %s: success=%s, fail=%s, disabled=%s",
                 provider_name,
@@ -191,9 +235,9 @@ def send_with_failover(
                 db_err,
             )
 
-    def _safe_record_failure(provider_name: str) -> None:
+    def _safe_record_failure(provider_name: str, health_service: str) -> None:
         try:
-            health = record_failure(db, provider_name, service)
+            health = record_failure(db, provider_name, health_service)
             logger.info(
                 "📊 Provider health → %s: success=%s, fail=%s, disabled=%s",
                 provider_name,
@@ -208,49 +252,71 @@ def send_with_failover(
                 db_err,
             )
 
-    for n, row in enumerate(rows, start=1):
-        logger.info(
-            "➡️ Trying provider: %s (priority=%s)",
-            row.name,
-            row.priority,
-        )
-        _log_provider_selected(row, service)
-        send_ok = False
-        try:
-            provider = build_provider_from_row(row)
-            provider.send(payload)
-            send_ok = True
-        except Exception as e:
-            last_exc = e
-            msg = f"{row.name}: {e}"
-            errors.append(msg)
-            _safe_record_failure(row.name)
-            logger.error("❌ Failed provider %s: %s", row.name, str(e))
-            logger.warning(
-                "delivery_provider_failed",
-                extra={
-                    "provider": row.name,
-                    "service": service,
-                    "error": str(e),
-                },
+    for i, svc in enumerate(chain):
+        if i > 0:
+            logger.info("🔁 Switching fallback → %s", svc)
+        rows = fetch_active_providers_for_service(db, svc)
+        if not rows:
+            logger.info(
+                "No active providers for fallback service=%r — trying next in chain",
+                svc,
             )
             continue
+        saw_any_provider = True
+        send_payload = _payload_for_service(svc, payload, job)
+        health_service = str(svc).strip().lower()
 
-        if send_ok:
-            _safe_record_success(row.name)
-            logger.info("✅ Success via %s", row.name)
+        for row in rows:
+            total_attempts += 1
             logger.info(
-                "🏁 Delivery completed → provider=%s, attempts=%s",
+                "➡️ Trying provider: %s (priority=%s) service=%s",
                 row.name,
-                n,
+                row.priority,
+                health_service,
             )
-            return row.name, "db"
+            _log_provider_selected(row, health_service)
+            send_ok = False
+            try:
+                provider = build_provider_from_row(row)
+                provider.send(send_payload)
+                send_ok = True
+            except Exception as e:
+                last_exc = e
+                msg = f"{health_service}/{row.name}: {e}"
+                errors.append(msg)
+                _safe_record_failure(row.name, health_service)
+                logger.error("❌ Failed provider %s: %s", row.name, str(e))
+                logger.warning(
+                    "delivery_provider_failed",
+                    extra={
+                        "provider": row.name,
+                        "service": health_service,
+                        "error": str(e),
+                    },
+                )
+                continue
+
+            if send_ok:
+                _safe_record_success(row.name, health_service)
+                logger.info("✅ Success via %s (service=%s)", row.name, health_service)
+                logger.info(
+                    "🏁 Delivery completed → provider=%s, attempts=%s",
+                    row.name,
+                    total_attempts,
+                )
+                return row.name, "db"
+
+    if not saw_any_provider:
+        raise RuntimeError(
+            "No active providers for any service in fallback chain %r — add rows to "
+            "email_delivery_providers" % (chain,)
+        )
 
     logger.info(
         "🏁 Delivery completed → provider=None, attempts=%s (all failed)",
-        len(rows),
+        total_attempts,
     )
     raise ProviderError(
-        "All delivery providers failed for service=%r: %s"
-        % (service, "; ".join(errors))
+        "All delivery providers failed for requested=%r (chain=%r): %s"
+        % (requested, chain, "; ".join(errors))
     ) from last_exc

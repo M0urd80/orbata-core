@@ -1,7 +1,8 @@
 import logging
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db_session import SessionLocal
 from usage_model import Service, Usage, utc_today
@@ -30,8 +31,8 @@ def record_email_delivery(
     client_id: str | None, success: bool, service_id: str | None = None
 ) -> None:
     """
-    After an SMTP attempt: bump success_count or fail_count for
-    (client_id, UTC date, service_id). Row should exist from /otp/send sent_count upsert.
+    After a delivery attempt: upsert success_count or fail_count for
+    (client_id, UTC date, service_id). Counts are added to existing row on conflict.
     """
     if not client_id:
         return
@@ -49,41 +50,24 @@ def record_email_delivery(
             logger.warning("Could not resolve service_id for usage update, skipping")
             return
 
-        if success:
-            stmt = (
-                update(Usage)
-                .where(
-                    Usage.client_id == cid,
-                    Usage.date == today,
-                    Usage.service_id == sid,
-                )
-                .values(success_count=Usage.success_count + 1)
-            )
-        else:
-            stmt = (
-                update(Usage)
-                .where(
-                    Usage.client_id == cid,
-                    Usage.date == today,
-                    Usage.service_id == sid,
-                )
-                .values(fail_count=Usage.fail_count + 1)
-            )
-        result = db.execute(stmt)
-        if result.rowcount:
-            db.commit()
-            return
-
-        db.add(
-            Usage(
-                client_id=cid,
-                date=today,
-                service_id=sid,
-                sent_count=0,
-                success_count=1 if success else 0,
-                fail_count=0 if success else 1,
-            )
+        stmt = pg_insert(Usage).values(
+            id=uuid.uuid4(),
+            client_id=cid,
+            date=today,
+            service_id=sid,
+            sent_count=0,
+            success_count=1 if success else 0,
+            fail_count=0 if success else 1,
         )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_usage_client_date_service_id",
+            set_={
+                "sent_count": Usage.sent_count + stmt.excluded.sent_count,
+                "success_count": Usage.success_count + stmt.excluded.success_count,
+                "fail_count": Usage.fail_count + stmt.excluded.fail_count,
+            },
+        )
+        db.execute(stmt)
         db.commit()
     except Exception as e:
         db.rollback()
